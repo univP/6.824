@@ -1,7 +1,10 @@
 package mapreduce
 
-import "container/list"
-import "fmt"
+import (
+	"container/list"
+	"fmt"
+	"time"
+)
 
 type WorkerInfo struct {
 	address string
@@ -29,17 +32,45 @@ func (mr *MapReduce) KillWorkers() *list.List {
 func (mr *MapReduce) RunMaster() *list.List {
 	// Your code here
 	// Listen to incoming registrations
-	worker := <-mr.registerChannel
-	// Assign map and reduce jobs
-	for i := 0; i < mr.nMap; i++ {
-		args := &DoJobArgs{File: mr.file, Operation: Map, JobNumber: i, NumOtherPhase: mr.nReduce}
-		var reply DoJobReply
-		call(worker, "Worker.DoJob", args, &reply)
+	workers := make([]string, 0)
+	timeout := time.After(1000 * time.Millisecond)
+L:
+	for {
+		select {
+		case v := <-mr.registerChannel:
+			workers = append(workers, v)
+		case <-timeout:
+			break L
+		default:
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
+	done := make(chan bool)
+	// Assign map jobs
+	for i := 0; i < mr.nMap; i++ {
+		go func(i int) {
+			args := &DoJobArgs{File: mr.file, Operation: Map, JobNumber: i, NumOtherPhase: mr.nReduce}
+			var reply DoJobReply
+			call(workers[i%cap(workers)], "Worker.DoJob", args, &reply)
+			done <- true
+		}(i)
+	}
+	// Wait for them to complete
+	for i := 0; i < mr.nMap; i++ {
+		<-done
+	}
+	// Assign reduce jobs
 	for i := 0; i < mr.nReduce; i++ {
-		args := &DoJobArgs{File: mr.file, Operation: Reduce, JobNumber: i, NumOtherPhase: mr.nMap}
-		var reply DoJobReply
-		call(worker, "Worker.DoJob", args, &reply)
+		go func(i int) {
+			args := &DoJobArgs{File: mr.file, Operation: Reduce, JobNumber: i, NumOtherPhase: mr.nMap}
+			var reply DoJobReply
+			call(workers[i%cap(workers)], "Worker.DoJob", args, &reply)
+			done <- true
+		}(i)
+	}
+	// Wait for them to complete
+	for i := 0; i < mr.nReduce; i++ {
+		<-done
 	}
 	// Final step merge
 	mr.Merge()
